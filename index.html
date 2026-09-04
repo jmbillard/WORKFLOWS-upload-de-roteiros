@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+
+<head>
+  <meta charset="UTF-8">
+
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <meta name="description" content="Envie e acompanhe o processamento de arquivos de roteiro.">
+
+  <title>Upload de Roteiros</title>
+  <link
+    rel="icon"
+    type="image/png"
+    sizes="32x32"
+    href="./favicon.png"
+  >
+
+  <link
+    rel="shortcut icon"
+    type="image/png"
+    href="./favicon.png"
+  >
+
+  <link
+    rel="apple-touch-icon"
+    href="./favicon.png"
+  >
+  <link rel="stylesheet" href="./styles.css">
+</head>
+
+<body>
+  <main class="app-shell">
+    <!-- Barra superior -->
+    <header class="topbar">
+      <a class="brand" href="#" aria-label="Upload de Roteiros">
+        <!-- <span class="brand-symbol" aria-hidden="true">
+          <svg viewBox="0 0 24 24">
+            <path d="M7 3.75h7.3L19 8.45v11.8H7z" />
+            <path d="M14 3.75v5h5" />
+            <path d="M10 12h6M10 15.5h6" />
+          </svg>
+        </span> -->
+
+        <span class="brand-copy">
+          <strong>PROMO</strong>
+          <small>workflows</small>
+        </span>
+      </a>
+
+      <div class="topbar-status">
+        <span id="connection-status" class="connection-status is-checking" role="status" aria-live="polite">
+          <span class="connection-dot" aria-hidden="true"></span>
+          <span id="connection-status-label">Verificando...</span>
+        </span>
+
+        <!-- <span class="topbar-divider" aria-hidden="true"></span>
+
+        <span class="topbar-information">
+          Envio sequencial · 3 segundos
+        </span> -->
+      </div>
+    </header>
+
+    <div class="workspace">
+      <!-- Coluna de apresentação e upload -->
+      <section class="upload-side" aria-labelledby="page-title">
+
+        <div class="upload-side-content">
+          <header class="hero">
+            <p class="eyebrow">versão - 2.5</p>
+
+            <h1 id="page-title">
+              Upload de Roteiros
+            </h1>
+
+            <!-- <p class="hero-description">
+              versão - 2.5
+            </p> -->
+          </header>
+
+          <section class="upload-section" aria-labelledby="upload-title">
+            <h2 id="upload-title" class="visually-hidden">
+              Enviar arquivos
+            </h2>
+
+            <div id="drop-zone" class="drop-zone" tabindex="0" role="button"
+              aria-label="Selecionar arquivos ou arrastar arquivos para envio">
+              <input id="file-input" class="visually-hidden" type="file" accept=".docx,.txt,.pdf,.rtf" multiple>
+
+              <div class="upload-illustration" aria-hidden="true">
+                <span class="document document-back"></span>
+                <span class="document document-middle"></span>
+
+                <span class="document document-front">
+                  <svg viewBox="0 0 24 24">
+                    <path d="M7 3.5h6.5L18 8v12.5H7z" />
+                    <path d="M13.5 3.5V8H18" />
+                    <path d="M9.5 12h6M9.5 15h6" />
+                  </svg>
+                </span>
+
+                <span class="upload-arrow">↑</span>
+              </div>
+
+              <p id="drop-zone-title" class="drop-zone-title">
+                Solte os roteiros aqui
+              </p>
+
+              <p id="drop-zone-description" class="drop-zone-description">
+                Arraste ou selecione no seu computador.
+              </p>
+
+              <button id="select-files-button" class="button button-upload" type="button">
+                Selecionar arquivos
+              </button>
+
+              <div class="format-list" aria-label="Formatos permitidos">
+                <span>DOCX</span>
+                <span>PDF</span>
+                <span>TXT</span>
+                <span>RTF</span>
+              </div>
+
+              <p id="upload-limit" class="upload-limit">
+                Limite de 25 MB por arquivo
+              </p>
+            </div>
+
+            <div id="validation-messages" class="validation-messages" aria-live="polite" aria-atomic="false"></div>
+          </section>
+
+          <div class="integration-information">
+            <span>
+              <span class="information-icon">✓</span>
+              Identificação de redatores:<br>DOCX, PDF
+            </span>
+
+            <span>
+              <span class="information-icon">✓</span>
+              Extração de Artes:<br>DOCX, RTF
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Coluna operacional -->
+      <section class="queue-side" aria-labelledby="queue-title">
+        <header class="queue-header">
+          <div>
+            <p class="section-eyebrow">Área operacional</p>
+            <h2 id="queue-title">Fila de upload</h2>
+
+            <p id="queue-state-message" class="queue-state-message">
+              Adicione arquivos para iniciar o processamento.
+            </p>
+          </div>
+
+          <div class="queue-actions">
+            <button id="pause-button" class="button button-secondary button-compact" type="button" disabled>
+              <span class="button-icon" aria-hidden="true">Ⅱ</span>
+              <span>Pausar</span>
+            </button>
+
+            <button id="retry-all-button" class="button button-secondary button-compact" type="button" hidden>
+              Reenviar erros
+            </button>
+
+            <details id="general-actions-menu" class="actions-menu">
+              <summary class="button button-secondary button-compact" aria-label="Abrir mais ações">
+                Mais ações
+                <span aria-hidden="true">⌄</span>
+              </summary>
+
+              <div class="menu-popover">
+                <button id="remove-completed-button" type="button" disabled>
+                  Excluir concluídos
+                </button>
+
+                <button id="remove-errors-button" type="button" disabled>
+                  Excluir arquivos com erro
+                </button>
+
+                <span class="menu-separator" aria-hidden="true"></span>
+
+                <button id="clear-queue-button" class="menu-danger" type="button" disabled>
+                  Limpar fila
+                </button>
+              </div>
+            </details>
+          </div>
+        </header>
+
+        <!-- Progresso -->
+        <section class="progress-section" aria-labelledby="progress-label">
+          <div class="progress-header">
+            <p id="progress-label">
+              <strong id="progress-description">Nenhum arquivo processado</strong>
+            </p>
+
+            <span id="progress-percentage">0%</span>
+          </div>
+
+          <div id="progress-track" class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+            aria-valuenow="0">
+            <div id="progress-bar" class="progress-bar"></div>
+          </div>
+        </section>
+
+        <!-- Métricas -->
+        <section class="summary-grid" aria-label="Resumo da fila">
+          <article class="summary-card summary-total">
+            <span class="summary-dot" aria-hidden="true"></span>
+
+            <span class="summary-content">
+              <strong id="count-total" class="summary-value">0</strong>
+              <span class="summary-label">Total</span>
+            </span>
+          </article>
+
+          <article class="summary-card summary-waiting">
+            <span class="summary-dot" aria-hidden="true"></span>
+
+            <span class="summary-content">
+              <strong id="count-waiting" class="summary-value">0</strong>
+              <span class="summary-label">Aguardando</span>
+            </span>
+          </article>
+
+          <article class="summary-card summary-processing">
+            <span class="summary-dot" aria-hidden="true"></span>
+
+            <span class="summary-content">
+              <strong id="count-processing" class="summary-value">0</strong>
+              <span class="summary-label">Processando</span>
+            </span>
+          </article>
+
+          <article class="summary-card summary-success">
+            <span class="summary-dot" aria-hidden="true"></span>
+
+            <span class="summary-content">
+              <strong id="count-success" class="summary-value">0</strong>
+              <span class="summary-label">Concluídos</span>
+            </span>
+          </article>
+
+          <article class="summary-card summary-error">
+            <span class="summary-dot" aria-hidden="true"></span>
+
+            <span class="summary-content">
+              <strong id="count-error" class="summary-value">0</strong>
+              <span class="summary-label">Com erro</span>
+            </span>
+          </article>
+        </section>
+
+        <!-- Lista da fila -->
+        <div class="queue-content">
+          <div id="empty-state" class="empty-state">
+            <div class="empty-illustration" aria-hidden="true">
+              <span></span>
+              <span></span>
+              <span></span>
+            </div>
+
+            <h3>Sua fila está vazia</h3>
+
+            <p>
+              Os arquivos adicionados aparecerão aqui com o status
+              e o resultado do processamento.
+            </p>
+
+            <ol class="empty-steps">
+              <li>
+                <span>1</span>
+                Cheque se o workflow está ativo
+              </li>
+
+              <li>
+                <span>2</span>
+                Selecione os documentos
+              </li>
+
+              <li>
+                <span>3</span>
+                Confira os cards no Trello
+              </li>
+            </ol>
+          </div>
+
+          <ul id="file-list" class="file-list" aria-live="polite" aria-label="Arquivos na fila" hidden></ul>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script src="./app.js" defer></script>
+</body>
+
+</html>
