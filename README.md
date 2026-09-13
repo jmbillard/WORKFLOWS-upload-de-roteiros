@@ -52,9 +52,3 @@ Os parâmetros ficam no topo do `app.js`, no objeto `CONFIG`:
 ## Compatibilidade
 
 Usa recursos modernos de CSS (Container Queries, `clamp()`, CSS Grid) e JavaScript (async/await, `fetch`). Recomendado Chrome, Edge, Firefox ou Safari em versões recentes (últimos ~2 anos).
-
-## Acessibilidade
-
-- Áreas de status usam `aria-live` para leitores de tela.
-- Drop zone navegável por teclado (`tabindex`, `role="button"`).
-- Textos alternativos e rótulos (`aria-label`) nos controles principais.
