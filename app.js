@@ -57,6 +57,7 @@ const state = {
   items: [],
   isPaused: false,
   isRunnerActive: false,
+  isWorkspaceExpanded: false,
   lastDispatchAt: 0,
   renderedItemIds: new Set(),
 
@@ -138,12 +139,57 @@ function initialize() {
 
 function initializeVisualEffects() {
   initializeTypewriter();
+  initializeMouseGradient();
 
   window.requestAnimationFrame(() => {
     window.requestAnimationFrame(() => {
       document.body.classList.add("motion-ready");
     });
   });
+}
+
+function initializeMouseGradient() {
+  const prefersReducedMotion = window.matchMedia(
+    "(prefers-reduced-motion: reduce)"
+  ).matches;
+
+  if (prefersReducedMotion) {
+    return;
+  }
+
+  let frameId = null;
+  let lastX = 14;
+  let lastY = 6;
+
+  window.addEventListener(
+    "pointermove",
+    (event) => {
+      if (frameId !== null) {
+        return;
+      }
+
+      frameId = window.requestAnimationFrame(() => {
+        const x = (event.clientX / window.innerWidth) * 100;
+        const y = (event.clientY / window.innerHeight) * 100;
+
+        lastX += (x - lastX) * 0.16;
+        lastY += (y - lastY) * 0.16;
+
+        document.body.style.setProperty(
+          "--mouse-x",
+          `${lastX.toFixed(2)}%`
+        );
+
+        document.body.style.setProperty(
+          "--mouse-y",
+          `${lastY.toFixed(2)}%`
+        );
+
+        frameId = null;
+      });
+    },
+    { passive: true }
+  );
 }
 
 function initializeTypewriter() {
@@ -359,7 +405,7 @@ function addFiles(fileList) {
   }
 
   if (acceptedCount > 0) {
-    addValidationMessage(
+    announceAction(
       acceptedCount === 1
         ? "Arquivo adicionado à fila."
         : `${acceptedCount} arquivos adicionados à fila.`,
@@ -580,6 +626,7 @@ async function processItem(item) {
   item.attempts += 1;
   item.justCompleted = false;
 
+  expandWorkspace();
   render();
 
   const controller = new AbortController();
@@ -800,6 +847,11 @@ function retryItem(itemId) {
   state.items.splice(itemIndex, 1);
   state.items.push(item);
 
+  announceAction(
+    `Arquivo ${getFileLabel(item)} reenviado para a fila.`,
+    "success"
+  );
+
   render();
   startQueue();
 }
@@ -861,11 +913,19 @@ function removeItem(itemId) {
     return;
   }
 
+  const fileName = item.file.name;
+
   state.items = state.items.filter(
     (queueItem) => queueItem.id !== itemId
   );
 
   state.renderedItemIds.delete(itemId);
+
+  announceAction(
+    `Arquivo "${fileName}" excluído da fila.`,
+    "success"
+  );
+
   render();
 }
 
@@ -874,6 +934,8 @@ function removeCompletedItems() {
     .filter((item) => item.status === STATUS.SUCCESS)
     .map((item) => item.id);
 
+  const removedCount = completedIds.length;
+
   state.items = state.items.filter(
     (item) => item.status !== STATUS.SUCCESS
   );
@@ -881,6 +943,15 @@ function removeCompletedItems() {
   completedIds.forEach((id) => {
     state.renderedItemIds.delete(id);
   });
+
+  if (removedCount > 0) {
+    announceAction(
+      removedCount === 1
+        ? "1 arquivo concluído foi excluído da fila."
+        : `${removedCount} arquivos concluídos foram excluídos da fila.`,
+      "success"
+    );
+  }
 
   closeAllMenus();
   render();
@@ -891,6 +962,8 @@ function removeErrorItems() {
     .filter((item) => item.status === STATUS.ERROR)
     .map((item) => item.id);
 
+  const removedCount = errorIds.length;
+
   state.items = state.items.filter(
     (item) => item.status !== STATUS.ERROR
   );
@@ -898,6 +971,15 @@ function removeErrorItems() {
   errorIds.forEach((id) => {
     state.renderedItemIds.delete(id);
   });
+
+  if (removedCount > 0) {
+    announceAction(
+      removedCount === 1
+        ? "1 arquivo com erro foi excluído da fila."
+        : `${removedCount} arquivos com erro foram excluídos da fila.`,
+      "success"
+    );
+  }
 
   closeAllMenus();
   render();
@@ -939,6 +1021,13 @@ function clearQueue() {
     }
   });
 
+  announceAction(
+    processingCount > 0
+      ? "A fila foi limpa. O arquivo em processamento foi mantido."
+      : "A fila foi limpa.",
+    "success"
+  );
+
   closeAllMenus();
   render();
 }
@@ -965,6 +1054,10 @@ function closeAllMenus() {
 
 function render() {
   const counts = getCounts();
+
+  if (counts.total === 0) {
+    collapseWorkspace();
+  }
 
   renderCounters(counts);
   renderProgress(counts);
@@ -1161,7 +1254,7 @@ function createFileItemElement(item, isNew) {
   }
 
   const type = document.createElement("span");
-  type.className = "file-type";
+  type.className = `file-type file-type--${item.extension}`;
   type.textContent = getShortExtension(item.extension);
   type.setAttribute(
     "aria-label",
@@ -1551,4 +1644,31 @@ function updateConnectionStatus(status) {
 
   elements.connectionStatusLabel.textContent =
     labels[status] || "Estado desconhecido";
+}
+
+function expandWorkspace() {
+  if (state.isWorkspaceExpanded) {
+    return;
+  }
+
+  state.isWorkspaceExpanded = true;
+  document.querySelector(".app-shell")?.classList.add("is-expanded");
+}
+
+function collapseWorkspace() {
+  if (!state.isWorkspaceExpanded) {
+    return;
+  }
+
+  state.isWorkspaceExpanded = false;
+  document.querySelector(".app-shell")?.classList.remove("is-expanded");
+}
+
+function announceAction(message, type = "success") {
+  clearValidationMessages();
+  addValidationMessage(message, type);
+}
+
+function getFileLabel(item) {
+  return `"${item.file.name}"`;
 }
