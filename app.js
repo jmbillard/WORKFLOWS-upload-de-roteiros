@@ -6,19 +6,35 @@
 
 const CONFIG = Object.freeze({
   /*
-   * A extração acontece no navegador (extractor.js). O resultado e o
-   * arquivo original vão para a Pages Function, que cria o card no
-   * Trello. Use null para só extrair e exportar, sem servidor.
+   * A extração acontece no navegador (extractor.js). Os dados prontos
+   * e o arquivo original vão para o webhook do n8n (multipart/form-data).
+   * null = só extrair e exportar, sem enviar nada.
    */
-  API_URL: "/api/roteiros",
-  HEALTHCHECK_URL: "/api/health",
+  WEBHOOK_URL:
+    "****",
 
-  /* Enviar o arquivo original para ser anexado ao card. */
-  ATTACH_ORIGINAL_FILE: true,
+  /**
+   * Nome do campo multipart/form-data do arquivo recebido pelo n8n.
+   * null = não envia o arquivo, só os dados.
+   */
+  FILE_FIELD_NAME: "file",
 
+  /**
+   * Identificador estável enviado com todas as tentativas
+   * do mesmo arquivo. Defina como null para não enviar.
+   */
+  REQUEST_ID_FIELD_NAME: "request_id",
+
+  /** Intervalo mínimo entre o início de cada envio ao n8n. */
+  SEND_INTERVAL_MS: 3000,
   REQUEST_TIMEOUT_MS: 120000,
+
+  /** Deve responder { "online": true }. null = sem indicador. */
+  HEALTHCHECK_URL:
+    "****",
+
   HEALTHCHECK_INTERVAL_MS: 30000,
-  HEALTHCHECK_TIMEOUT_MS: 8000,
+  HEALTHCHECK_TIMEOUT_MS: 5000,
 
   MAX_FILE_SIZE_BYTES: 25 * 1024 * 1024,
   ALLOWED_EXTENSIONS: ["docx", "txt", "pdf", "rtf"],
@@ -51,6 +67,7 @@ const state = {
   isPaused: false,
   isRunnerActive: false,
   isWorkspaceExpanded: false,
+  lastDispatchAt: 0,
   renderedItemIds: new Set(),
   isHealthCheckRunning: false,
 
@@ -557,13 +574,44 @@ async function startQueue() {
       }
 
       /*
-       * Processa um arquivo por vez. A extração é local,
-       * então não há intervalo entre arquivos.
+       * Respeita o intervalo desde o início do envio anterior,
+       * para não sobrecarregar o n8n.
        */
-      await processItem(nextItem);
+      if (CONFIG.WEBHOOK_URL) {
+        await waitForDispatchInterval();
+      }
 
-      /* Libera a interface entre um arquivo e outro. */
-      await sleep(0);
+      if (state.isPaused) {
+        break;
+      }
+
+      /* O arquivo pode ter sido excluído durante a espera. */
+      const itemStillExists = state.items.some(
+        (item) =>
+          item.id === nextItem.id &&
+          item.status === STATUS.WAITING
+      );
+
+      if (!itemStillExists) {
+        continue;
+      }
+
+      state.lastDispatchAt = Date.now();
+
+      /*
+       * A extração é feita aqui, em sequência (é local).
+       * O envio ao n8n não é aguardado: a fila segue e o próximo
+       * arquivo começa depois do intervalo configurado.
+       */
+      const extracted = await extractItem(nextItem);
+
+      if (extracted && CONFIG.WEBHOOK_URL) {
+        void sendItem(nextItem).catch((error) => {
+          console.error("[Fila] Erro inesperado no envio:", error);
+        });
+      } else {
+        await sleep(0);
+      }
     }
   } finally {
     state.isRunnerActive = false;
@@ -584,7 +632,21 @@ async function startQueue() {
   }
 }
 
-async function processItem(item) {
+async function waitForDispatchInterval() {
+  if (!state.lastDispatchAt) {
+    return;
+  }
+
+  const waitingTime =
+    state.lastDispatchAt + CONFIG.SEND_INTERVAL_MS - Date.now();
+
+  if (waitingTime > 0) {
+    await sleep(waitingTime);
+  }
+}
+
+/* Extrai os dados no navegador. Retorna true se deu certo. */
+async function extractItem(item) {
   item.status = STATUS.PROCESSING;
   item.message = "Extraindo texto, autor e artes...";
   item.attempts += 1;
@@ -600,27 +662,41 @@ async function processItem(item) {
       throw new Error("O módulo de extração (extractor.js) não foi carregado.");
     }
 
-    const result = await window.RoteiroExtractor.extractFile(item.file);
-    item.result = result;
+    item.result = await window.RoteiroExtractor.extractFile(item.file);
 
-    let sent = null;
-
-    if (CONFIG.API_URL) {
-      item.message = "Criando card no Trello...";
-      render();
-      sent = await sendResult(item, result);
-      item.cardUrl = sent.card_url || null;
+    if (!CONFIG.WEBHOOK_URL) {
+      markSuccess(item, describeResult(item.result, null));
     }
 
-    item.status = STATUS.SUCCESS;
-    item.message = describeResult(result, sent);
-    item.justCompleted = true;
-
-    window.setTimeout(() => {
-      item.justCompleted = false;
-    }, 800);
+    return true;
   } catch (error) {
     console.error("[Extração]", item.file.name, error);
+    item.status = STATUS.ERROR;
+    item.message = getRequestErrorMessage(error);
+    return false;
+  } finally {
+    render();
+  }
+}
+
+/* Envia os dados extraídos e o arquivo original ao webhook do n8n. */
+async function sendItem(item) {
+  item.message = "Enviando ao workflow e aguardando resposta...";
+  render();
+
+  try {
+    validateIntegrationConfiguration();
+    const data = await postToWorkflow(item, item.result);
+
+    item.cardUrl = data.card_url || null;
+
+    if (data.success) {
+      markSuccess(item, describeResult(item.result, data));
+    } else {
+      item.status = STATUS.ERROR;
+      item.message = data.message;
+    }
+  } catch (error) {
     item.status = STATUS.ERROR;
     item.message = getRequestErrorMessage(error);
   } finally {
@@ -628,16 +704,58 @@ async function processItem(item) {
   }
 }
 
-async function sendResult(item, result) {
+function markSuccess(item, message) {
+  item.status = STATUS.SUCCESS;
+  item.message = message;
+  item.justCompleted = true;
+
+  window.setTimeout(() => {
+    item.justCompleted = false;
+  }, 800);
+}
+
+function validateIntegrationConfiguration() {
+  if (!/^https?:\/\//i.test(CONFIG.WEBHOOK_URL || "")) {
+    throw new Error(
+      "A URL do webhook ainda não foi configurada no app.js."
+    );
+  }
+}
+
+/*
+ * Campos enviados (multipart/form-data):
+ *   file              arquivo original (CONFIG.FILE_FIELD_NAME)
+ *   request_id        ID estável do arquivo na fila
+ *   arquivo, autor, formato, texto, artes_quantidade, interrompido_em
+ *   artes             JSON (array de strings)
+ *   avisos            JSON (array de strings)
+ *   dados             JSON com tudo acima, para quem preferir um campo só
+ */
+function buildWorkflowForm(item, result) {
   const formData = new FormData();
 
-  formData.append("resultado", JSON.stringify(result));
-  formData.append("request_id", item.requestId);
-
-  if (CONFIG.ATTACH_ORIGINAL_FILE) {
-    formData.append("file", item.file, item.file.name);
+  if (CONFIG.FILE_FIELD_NAME) {
+    formData.append(CONFIG.FILE_FIELD_NAME, item.file, item.file.name);
   }
 
+  if (CONFIG.REQUEST_ID_FIELD_NAME) {
+    formData.append(CONFIG.REQUEST_ID_FIELD_NAME, item.requestId);
+  }
+
+  formData.append("arquivo", result.arquivo);
+  formData.append("autor", result.autor);
+  formData.append("formato", result.formato);
+  formData.append("texto", result.texto);
+  formData.append("artes", JSON.stringify(result.artes));
+  formData.append("artes_quantidade", String(result.artes_quantidade));
+  formData.append("interrompido_em", result.interrompido_em || "");
+  formData.append("avisos", JSON.stringify(result.avisos));
+  formData.append("dados", JSON.stringify(result));
+
+  return formData;
+}
+
+async function postToWorkflow(item, result) {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(
     () => controller.abort(),
@@ -645,44 +763,81 @@ async function sendResult(item, result) {
   );
 
   try {
-    const response = await fetch(CONFIG.API_URL, {
+    const response = await fetch(CONFIG.WEBHOOK_URL, {
       method: "POST",
-      body: formData,
+      body: buildWorkflowForm(item, result),
       signal: controller.signal,
-      credentials: "same-origin"
+      credentials: "omit"
     });
 
-    const text = await response.text();
-    let data = null;
+    const responseText = await response.text();
 
-    try {
-      data = text ? JSON.parse(text) : null;
-    } catch {
-      data = null;
+    if (!response.ok) {
+      const workflowMessage = extractMessageFromText(responseText);
+
+      throw new Error(
+        workflowMessage
+          ? `Erro HTTP ${response.status}: ${workflowMessage}`
+          : `O workflow retornou erro HTTP ${response.status}.`
+      );
     }
 
-    if (!response.ok || !data || data.success !== true) {
-      const detail = data && typeof data.message === "string"
-        ? data.message
-        : `HTTP ${response.status}`;
-
-      throw new Error(`Texto extraído, mas o card não foi criado: ${detail}`);
-    }
-
-    return data;
-  } catch (error) {
-    if (error && error.name === "AbortError") {
-      throw new Error("O servidor demorou demais para responder.");
-    }
-
-    if (error instanceof TypeError) {
-      throw new Error("Não foi possível acessar o servidor. Verifique a conexão.");
-    }
-
-    throw error;
+    return parseWorkflowResponse(responseText);
   } finally {
     window.clearTimeout(timeoutId);
   }
+}
+
+function parseWorkflowResponse(responseText) {
+  if (!responseText || !responseText.trim()) {
+    throw new Error("O workflow retornou uma resposta vazia.");
+  }
+
+  let data;
+
+  try {
+    data = JSON.parse(responseText);
+  } catch {
+    throw new Error("O workflow retornou um JSON inválido.");
+  }
+
+  const result = Array.isArray(data) ? data[0] : data;
+
+  if (!result || typeof result !== "object") {
+    throw new Error("A resposta do workflow possui uma estrutura inesperada.");
+  }
+
+  if (typeof result.success !== "boolean") {
+    throw new Error('A resposta não contém o campo booleano "success".');
+  }
+
+  if (typeof result.message !== "string" || !result.message.trim()) {
+    throw new Error('A resposta não contém uma propriedade "message" válida.');
+  }
+
+  return {
+    success: result.success,
+    message: result.message.trim(),
+    card_url:
+      typeof result.card_url === "string" && /^https:\/\//.test(result.card_url)
+        ? result.card_url
+        : null
+  };
+}
+
+function extractMessageFromText(responseText) {
+  try {
+    const data = JSON.parse(responseText);
+    const result = Array.isArray(data) ? data[0] : data;
+
+    if (result && typeof result.message === "string") {
+      return result.message.trim();
+    }
+  } catch {
+    return "";
+  }
+
+  return "";
 }
 
 function describeResult(result, sent) {
@@ -705,6 +860,17 @@ function describeResult(result, sent) {
 }
 
 function getRequestErrorMessage(error) {
+  if (error && error.name === "AbortError") {
+    return "A requisição excedeu o tempo limite configurado.";
+  }
+
+  if (error instanceof TypeError && /fetch/i.test(error.message)) {
+    return (
+      "Não foi possível acessar o workflow. Verifique a conexão, " +
+      "a URL do webhook e a configuração de CORS."
+    );
+  }
+
   if (
     error &&
     typeof error.message === "string" &&
@@ -1228,7 +1394,7 @@ function createFileItemElement(item, isNew) {
     actions.append(cardLink);
   }
 
-  if (item.status === STATUS.SUCCESS && item.result) {
+  if (item.result && item.status !== STATUS.PROCESSING) {
     const viewButton = document.createElement("button");
 
     viewButton.type = "button";
@@ -1350,10 +1516,10 @@ function renderGeneralActions(counts) {
     counts.total === 0;
 
   elements.exportJsonButton.disabled =
-    counts.success === 0;
+    getResults().length === 0;
 
   elements.exportCsvButton.disabled =
-    counts.success === 0;
+    getResults().length === 0;
 }
 
 /* =========================================================
@@ -1456,7 +1622,7 @@ let currentResultItemId = null;
 
 function getResults() {
   return state.items
-    .filter((item) => item.status === STATUS.SUCCESS && item.result)
+    .filter((item) => item.result && item.status !== STATUS.PROCESSING)
     .map((item) => item.result);
 }
 
@@ -1630,7 +1796,7 @@ function downloadFile(fileName, content, type) {
 }
 
 function initializeHealthCheck() {
-  if (!CONFIG.API_URL || !CONFIG.HEALTHCHECK_URL) {
+  if (!CONFIG.WEBHOOK_URL || !/^https?:\/\//i.test(CONFIG.HEALTHCHECK_URL || "")) {
     updateConnectionStatus("local");
     return;
   }
@@ -1664,10 +1830,13 @@ async function checkWorkflowHealth() {
   );
 
   try {
-    const response = await fetch(CONFIG.HEALTHCHECK_URL, {
+    const healthUrl = new URL(CONFIG.HEALTHCHECK_URL);
+    healthUrl.searchParams.set("_healthcheck", Date.now().toString());
+
+    const response = await fetch(healthUrl.toString(), {
       headers: { Accept: "application/json" },
       cache: "no-store",
-      credentials: "same-origin",
+      credentials: "omit",
       signal: controller.signal
     });
 
@@ -1690,8 +1859,8 @@ async function checkWorkflowHealth() {
 function updateConnectionStatus(status) {
   const labels = {
     checking: "Verificando...",
-    online: "Trello conectado",
-    offline: "Trello indisponível",
+    online: "Workflow disponível",
+    offline: "Workflow indisponível",
     local: "Processamento local"
   };
 

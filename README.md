@@ -7,14 +7,14 @@ Ferramenta web que extrai, **direto no navegador e sem n8n**, as informações d
 - **texto**: texto completo, um parágrafo por linha;
 - **artes**: todos os textos sublinhados, sem duplicatas, e `artes_quantidade`.
 
-Depois da extração, uma **Pages Function** do Cloudflare (`functions/api/roteiros.js`) cria o card no Trello. A chave do Trello fica só no Cloudflare, nunca no navegador. A extração roda no navegador porque o pdf.js não cabe no limite de CPU de um Worker no plano gratuito.
+A extração roda no navegador de quem envia. O n8n recebe os **dados já extraídos junto com o arquivo original**, e não precisa mais abrir nem processar o documento: só cria os cards.
 
 ```
-navegador: extractor.js  ──(resultado JSON + arquivo)──▶  /api/roteiros  ──▶  Trello
-           (texto, autor, artes)                           (Pages Function)
+navegador: extractor.js  ──(arquivo + dados extraídos)──▶  webhook n8n  ──▶  Trello
+           (texto, autor, artes)
 ```
 
-Com `API_URL: null` em `app.js` o site funciona só localmente (extrai e exporta, sem Trello).
+Com `WEBHOOK_URL: null` em `app.js` o site só extrai e exporta, sem enviar nada.
 
 ## Visão geral
 
@@ -45,43 +45,44 @@ Os parâmetros ficam no topo do `extractor.js`, em `EXTRACTION_CONFIG`.
 - **TXT** não tem sublinhado nem autor: só o texto é extraído.
 - Cabeçalho, rodapé e notas de rodapé não entram no texto.
 
-## Card criado no Trello
+## O que o n8n recebe
 
-Na lista `TRELLO_LIST_ID`:
+`POST` em `WEBHOOK_URL`, `multipart/form-data`, um arquivo por requisição:
 
-- **nome**: nome do arquivo, sem extensão;
-- **descrição**: autor, nome do arquivo, quantidade e lista numerada das artes;
-- **checklist "Artes"**: um item por arte;
-- **anexo**: o arquivo original;
-- **etiquetas**: as de `TRELLO_LABEL_IDS`, se configuradas.
+| Campo | Conteúdo |
+|---|---|
+| `file` | Arquivo original (binário) |
+| `request_id` | ID estável do arquivo na fila (o mesmo em todas as tentativas) |
+| `arquivo` | Nome do arquivo |
+| `autor` | Autor (vazio se não identificado) |
+| `formato` | `docx`, `pdf`, `rtf` ou `txt` |
+| `texto` | Texto completo, um parágrafo por linha |
+| `artes` | **JSON**: array de strings |
+| `artes_quantidade` | Número (como texto) |
+| `interrompido_em` | `DECUPAGEM` se o texto foi cortado ali, senão vazio |
+| `avisos` | **JSON**: array de strings |
+| `dados` | **JSON** com todos os campos acima, num campo só |
 
-Reenvios do mesmo arquivo na mesma sessão não duplicam o card: a descrição guarda um `roteiro-id` e a função procura por ele na lista antes de criar.
+No n8n (nó Webhook com método POST), os campos de texto ficam em `$json.body` e o arquivo fica nos dados binários (nas versões atuais, com o nome do campo: `file`). Como multipart só transporta texto, `artes` chega como string JSON:
 
-## Deploy no Cloudflare Pages
-
-1. **Workers & Pages → Create → Pages → Connect to Git**, escolha este repositório.
-   - Framework preset: *None*; Build command: vazio; Build output directory: `/`.
-   - A pasta `functions/` é publicada automaticamente como Pages Functions.
-2. **Settings → Variables and Secrets** (Production e Preview):
-
-   | Variável | Tipo | Valor |
-   |---|---|---|
-   | `TRELLO_KEY` | Secret | API key do Power-Up (trello.com/power-ups/admin) |
-   | `TRELLO_TOKEN` | Secret | Token gerado para essa key |
-   | `TRELLO_LIST_ID` | Text | ID da lista de destino |
-   | `TRELLO_LABEL_IDS` | Text (opcional) | IDs de etiquetas, separados por vírgula |
-   | `ALLOWED_ORIGINS` | Text (opcional) | Outras origens que podem chamar a API |
-
-   O ID da lista aparece abrindo `https://trello.com/b/<board>.json` e procurando a lista em `lists`.
-3. Faça um novo deploy. O indicador no topo mostra **Trello conectado** quando `/api/health` consegue ler a lista.
-4. **Recomendado:** proteja o site com **Cloudflare Access** (Zero Trust → Access → Applications), liberando só os e-mails da equipe. Sem isso, qualquer pessoa com a URL consegue criar cards. A função recusa chamadas de outras origens, mas isso não substitui autenticação.
-
-### Testar localmente
-
-```bash
-cp .dev.vars.example .dev.vars   # preencha as variáveis
-npx wrangler pages dev .
 ```
+{{ JSON.parse($json.body.artes) }}
+```
+
+ou, para pegar tudo de uma vez, um nó **Code**:
+
+```js
+return $input.all().map((item) => ({
+  json: JSON.parse(item.json.body.dados),
+  binary: item.binary
+}));
+```
+
+Os nós de extração (Extract from File, XML e os Code de sublinhado) podem ser removidos do workflow.
+
+**Resposta esperada** (igual à de antes): JSON `{ "success": true|false, "message": "..." }`, também aceito dentro de um array. Opcionalmente `card_url` (https), que vira um botão **Abrir card** na fila.
+
+O healthcheck continua o mesmo: `GET HEALTHCHECK_URL` respondendo `{ "online": true }`.
 
 ## Estrutura de arquivos
 
@@ -90,9 +91,6 @@ index.html          Estrutura da página
 styles.css          Estilos (tokens de cor, layout, animações, responsividade)
 app.js              Interface: validação, fila, resultados, exportação
 extractor.js        Extração de texto, autor e artes (DOCX, PDF, RTF, TXT)
-functions/api/roteiros.js   POST: cria o card no Trello
-functions/api/health.js     GET: confere configuração e acesso à lista
-functions/_lib/trello.js    Cliente da API do Trello e utilitários
 vendor/pdfjs/       pdf.js 4.10.38 (Mozilla, Apache-2.0), carregado só quando há PDF
 favicon.png         Ícone da aba
 ```
@@ -105,10 +103,12 @@ O DOCX é descompactado com `DecompressionStream`, nativo do navegador; o RTF é
 
 | Campo | Descrição |
 |---|---|
-| `API_URL` | Endpoint que cria o card (`/api/roteiros`). `null` = só local. |
-| `HEALTHCHECK_URL` | Endpoint do indicador de status (`/api/health`). |
-| `ATTACH_ORIGINAL_FILE` | Envia o arquivo original para anexar ao card. |
-| `REQUEST_TIMEOUT_MS` | Tempo máximo de espera pela criação do card. |
+| `WEBHOOK_URL` | Webhook do n8n que recebe arquivo + dados. `null` = só local. |
+| `FILE_FIELD_NAME` | Nome do campo do arquivo (padrão `file`; `null` = não envia o arquivo). |
+| `REQUEST_ID_FIELD_NAME` | Campo com o ID estável por arquivo, para o n8n reconhecer reenvios. |
+| `SEND_INTERVAL_MS` | Intervalo mínimo entre o início de cada envio (padrão 3 s). |
+| `REQUEST_TIMEOUT_MS` | Tempo máximo de espera pela resposta do n8n. |
+| `HEALTHCHECK_URL` | Endpoint do indicador "Workflow disponível". |
 | `MAX_FILE_SIZE_BYTES` | Limite de tamanho por arquivo. |
 | `ALLOWED_EXTENSIONS` | Extensões aceitas. |
 | `MAX_ATTEMPTS` | Limite de tentativas de reprocessamento (`null` = ilimitado). |
@@ -116,9 +116,10 @@ O DOCX é descompactado com `DecompressionStream`, nativo do navegador; o RTF é
 
 `extractor.js` → `EXTRACTION_CONFIG`: palavra de parada, regras de união, padrões ignorados, espessura dos traços de sublinhado em PDF.
 
-## Como usar localmente
+## Como usar
 
-Sem Trello: defina `API_URL: null` e sirva a pasta por um servidor HTTP simples (ex.: `python3 -m http.server`). Com Trello, use `wrangler pages dev` (acima).
+1. Preencha `WEBHOOK_URL` e `HEALTHCHECK_URL` em `app.js`. O n8n precisa liberar CORS para a origem do site, como já era antes.
+2. Publique os arquivos como site estático (Cloudflare Pages, sem build e com saída `/`) ou sirva localmente com `python3 -m http.server`.
 
 Abrir o `index.html` direto do disco (`file://`) não funciona para PDF, porque o navegador bloqueia o carregamento de módulos nesse modo.
 
