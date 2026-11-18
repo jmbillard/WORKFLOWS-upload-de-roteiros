@@ -5,25 +5,10 @@
    ========================================================= */
 
 const CONFIG = Object.freeze({
-  /**
-   * Substitua pela URL final que você já testou.
+  /*
+   * Todo o processamento acontece no navegador (extractor.js).
+   * Nenhum arquivo é enviado para servidor.
    */
-  WEBHOOK_URL:
-    "****",
-
-  /**
-   * Nome do campo multipart/form-data recebido pelo n8n.
-   */
-  FILE_FIELD_NAME: "file",
-
-  /**
-   * Identificador estável enviado com todas as tentativas
-   * do mesmo arquivo. Defina como null para não enviar.
-   */
-  REQUEST_ID_FIELD_NAME: "request_id",
-
-  SEND_INTERVAL_MS: 3000,
-  REQUEST_TIMEOUT_MS: 120000,
   MAX_FILE_SIZE_BYTES: 25 * 1024 * 1024,
   ALLOWED_EXTENSIONS: ["docx", "txt", "pdf", "rtf"],
 
@@ -32,11 +17,8 @@ const CONFIG = Object.freeze({
    */
   MAX_ATTEMPTS: null,
 
-  HEALTHCHECK_URL:
-    "****",
-
-  HEALTHCHECK_INTERVAL_MS: 30000,
-  HEALTHCHECK_TIMEOUT_MS: 5000,
+  /** Nome base dos arquivos exportados. */
+  EXPORT_FILE_NAME: "roteiros"
 });
 
 const STATUS = Object.freeze({
@@ -58,11 +40,7 @@ const state = {
   isPaused: false,
   isRunnerActive: false,
   isWorkspaceExpanded: false,
-  lastDispatchAt: 0,
   renderedItemIds: new Set(),
-
-  healthCheckIntervalId: null,
-  isHealthCheckRunning: false,
 
   previousCounts: {
     total: 0,
@@ -72,13 +50,6 @@ const state = {
     error: 0
   }
 };
-
-/*
- * Estado do healthcheck.
- * Deve ser declarado antes da chamada initialize().
- */
-let healthCheckIntervalId = null;
-let isHealthCheckRunning = false;
 
 /* =========================================================
    Elementos
@@ -104,6 +75,18 @@ const elements = {
   ),
   removeErrorsButton: document.querySelector("#remove-errors-button"),
   clearQueueButton: document.querySelector("#clear-queue-button"),
+  exportJsonButton: document.querySelector("#export-json-button"),
+  exportCsvButton: document.querySelector("#export-csv-button"),
+
+  resultDialog: document.querySelector("#result-dialog"),
+  resultTitle: document.querySelector("#result-title"),
+  resultMeta: document.querySelector("#result-meta"),
+  resultWarnings: document.querySelector("#result-warnings"),
+  resultArtesCount: document.querySelector("#result-artes-count"),
+  resultArtes: document.querySelector("#result-artes"),
+  resultText: document.querySelector("#result-text"),
+  resultCopyButton: document.querySelector("#result-copy-button"),
+  resultDownloadButton: document.querySelector("#result-download-button"),
   generalActionsMenu: document.querySelector("#general-actions-menu"),
 
   progressDescription: document.querySelector("#progress-description"),
@@ -134,7 +117,7 @@ function initialize() {
   initializeVisualEffects();
   registerEvents();
   render();
-  initializeHealthCheck();
+  updateConnectionStatus("online");
 }
 
 function initializeVisualEffects() {
@@ -336,6 +319,28 @@ function registerEvents() {
   );
 
   elements.clearQueueButton.addEventListener("click", clearQueue);
+
+  elements.exportJsonButton.addEventListener("click", () => {
+    closeAllMenus();
+    exportResults("json");
+  });
+
+  elements.exportCsvButton.addEventListener("click", () => {
+    closeAllMenus();
+    exportResults("csv");
+  });
+
+  elements.resultCopyButton.addEventListener("click", copyCurrentResult);
+  elements.resultDownloadButton.addEventListener("click", downloadCurrentResult);
+
+  elements.resultDialog.addEventListener("click", (event) => {
+    if (
+      event.target === elements.resultDialog ||
+      event.target.closest("[data-close-dialog]")
+    ) {
+      elements.resultDialog.close();
+    }
+  });
 
   /**
    * Fecha menus quando o usuário clica fora deles.
@@ -540,51 +545,13 @@ async function startQueue() {
       }
 
       /*
-       * Aguarda até completar três segundos desde o início
-       * do envio anterior.
+       * Processa um arquivo por vez. A extração é local,
+       * então não há intervalo entre arquivos.
        */
-      await waitForDispatchInterval();
+      await processItem(nextItem);
 
-      if (state.isPaused) {
-        break;
-      }
-
-      /*
-       * O arquivo pode ter sido excluído enquanto o runner
-       * aguardava o intervalo.
-       */
-      const itemStillExists = state.items.some(
-        (item) =>
-          item.id === nextItem.id &&
-          item.status === STATUS.WAITING
-      );
-
-      if (!itemStillExists) {
-        continue;
-      }
-
-      /*
-       * Registra o momento do início antes de disparar a requisição.
-       */
-      state.lastDispatchAt = Date.now();
-
-      /*
-       * Não utiliza await.
-       *
-       * A requisição começa agora, mas a fila continua e poderá
-       * iniciar o próximo arquivo após três segundos.
-       */
-      void processItem(nextItem).catch((error) => {
-        /*
-         * processItem já trata normalmente os próprios erros.
-         * Este catch evita uma Promise rejeitada sem tratamento
-         * caso ocorra alguma falha fora do fluxo esperado.
-         */
-        console.error(
-          "[Fila] Erro inesperado durante o processamento:",
-          error
-        );
-      });
+      /* Libera a interface entre um arquivo e outro. */
+      await sleep(0);
     }
   } finally {
     state.isRunnerActive = false;
@@ -605,187 +572,56 @@ async function startQueue() {
   }
 }
 
-async function waitForDispatchInterval() {
-  if (!state.lastDispatchAt) {
-    return;
-  }
-
-  const nextAllowedTime =
-    state.lastDispatchAt + CONFIG.SEND_INTERVAL_MS;
-
-  const waitingTime = nextAllowedTime - Date.now();
-
-  if (waitingTime > 0) {
-    await sleep(waitingTime);
-  }
-}
-
 async function processItem(item) {
   item.status = STATUS.PROCESSING;
-  item.message = "Enviando arquivo e aguardando resposta...";
+  item.message = "Extraindo texto, autor e artes...";
   item.attempts += 1;
   item.justCompleted = false;
+  item.result = null;
 
   expandWorkspace();
   render();
 
-  const controller = new AbortController();
-
-  const timeoutId = window.setTimeout(() => {
-    controller.abort();
-  }, CONFIG.REQUEST_TIMEOUT_MS);
-
   try {
-    validateIntegrationConfiguration();
-
-    const formData = new FormData();
-
-    formData.append(
-      CONFIG.FILE_FIELD_NAME,
-      item.file,
-      item.file.name
-    );
-
-    if (CONFIG.REQUEST_ID_FIELD_NAME) {
-      formData.append(
-        CONFIG.REQUEST_ID_FIELD_NAME,
-        item.requestId
-      );
+    if (!window.RoteiroExtractor) {
+      throw new Error("O módulo de extração (extractor.js) não foi carregado.");
     }
 
-    const response = await fetch(CONFIG.WEBHOOK_URL, {
-      method: "POST",
-      body: formData,
-      signal: controller.signal,
-      credentials: "omit"
-    });
+    const result = await window.RoteiroExtractor.extractFile(item.file);
 
-    const responseText = await response.text();
+    item.result = result;
+    item.status = STATUS.SUCCESS;
+    item.message = describeResult(result);
+    item.justCompleted = true;
 
-    if (!response.ok) {
-      const workflowMessage =
-        extractMessageFromText(responseText);
-
-      throw new Error(
-        workflowMessage
-          ? `Erro HTTP ${response.status}: ${workflowMessage}`
-          : `O workflow retornou erro HTTP ${response.status}.`
-      );
-    }
-
-    const result = parseWorkflowResponse(responseText);
-
-    if (result.success) {
-      item.status = STATUS.SUCCESS;
-      item.message = result.message;
-      item.justCompleted = true;
-
-      window.setTimeout(() => {
-        item.justCompleted = false;
-      }, 800);
-    } else {
-      item.status = STATUS.ERROR;
-      item.message = result.message;
-    }
+    window.setTimeout(() => {
+      item.justCompleted = false;
+    }, 800);
   } catch (error) {
+    console.error("[Extração]", item.file.name, error);
     item.status = STATUS.ERROR;
     item.message = getRequestErrorMessage(error);
   } finally {
-    window.clearTimeout(timeoutId);
     render();
   }
 }
 
-function validateIntegrationConfiguration() {
-  if (
-    !CONFIG.WEBHOOK_URL ||
-    CONFIG.WEBHOOK_URL.includes("SEU-N8N.EXEMPLO.COM")
-  ) {
-    throw new Error(
-      "A URL do webhook ainda não foi configurada no app.js."
-    );
+function describeResult(result) {
+  const parts = [
+    result.artes_quantidade === 1
+      ? "1 arte"
+      : `${result.artes_quantidade} artes`,
+    result.autor ? `autor: ${result.autor}` : "autor não identificado"
+  ];
+
+  if (result.avisos.length > 0) {
+    parts.push(result.avisos[0]);
   }
 
-  if (!CONFIG.FILE_FIELD_NAME) {
-    throw new Error(
-      "O nome do campo de arquivo não foi configurado."
-    );
-  }
-}
-
-function parseWorkflowResponse(responseText) {
-  if (!responseText || !responseText.trim()) {
-    throw new Error("O workflow retornou uma resposta vazia.");
-  }
-
-  let data;
-
-  try {
-    data = JSON.parse(responseText);
-  } catch {
-    throw new Error("O workflow retornou um JSON inválido.");
-  }
-
-  const result = Array.isArray(data) ? data[0] : data;
-
-  if (!result || typeof result !== "object") {
-    throw new Error(
-      "A resposta do workflow possui uma estrutura inesperada."
-    );
-  }
-
-  if (typeof result.success !== "boolean") {
-    throw new Error(
-      'A resposta não contém o campo booleano "success".'
-    );
-  }
-
-  if (
-    typeof result.message !== "string" ||
-    !result.message.trim()
-  ) {
-    throw new Error(
-      'A resposta não contém uma propriedade "message" válida.'
-    );
-  }
-
-  return {
-    success: result.success,
-    message: result.message.trim()
-  };
-}
-
-function extractMessageFromText(responseText) {
-  if (!responseText || !responseText.trim()) {
-    return "";
-  }
-
-  try {
-    const data = JSON.parse(responseText);
-    const result = Array.isArray(data) ? data[0] : data;
-
-    if (result && typeof result.message === "string") {
-      return result.message.trim();
-    }
-  } catch {
-    return "";
-  }
-
-  return "";
+  return parts.join(" · ");
 }
 
 function getRequestErrorMessage(error) {
-  if (error && error.name === "AbortError") {
-    return "A requisição excedeu o tempo limite configurado.";
-  }
-
-  if (error instanceof TypeError) {
-    return (
-      "Não foi possível acessar o workflow. Verifique a conexão, " +
-      "a URL do webhook e a configuração de CORS."
-    );
-  }
-
   if (
     error &&
     typeof error.message === "string" &&
@@ -794,7 +630,7 @@ function getRequestErrorMessage(error) {
     return error.message.trim();
   }
 
-  return "Não foi possível concluir a comunicação com o workflow.";
+  return "Não foi possível processar o arquivo.";
 }
 
 /* =========================================================
@@ -819,6 +655,10 @@ function handleFileAction(event) {
 
   if (action === "remove") {
     removeItem(itemId);
+  }
+
+  if (action === "view") {
+    openResult(itemId);
   }
 }
 
@@ -848,7 +688,7 @@ function retryItem(itemId) {
   state.items.push(item);
 
   announceAction(
-    `Arquivo ${getFileLabel(item)} reenviado para a fila.`,
+    `Arquivo ${getFileLabel(item)} voltou para a fila.`,
     "success"
   );
 
@@ -1293,6 +1133,18 @@ function createFileItemElement(item, isNew) {
   const actions = document.createElement("div");
   actions.className = "file-actions";
 
+  if (item.status === STATUS.SUCCESS && item.result) {
+    const viewButton = document.createElement("button");
+
+    viewButton.type = "button";
+    viewButton.className = "button button-retry";
+    viewButton.dataset.action = "view";
+    viewButton.dataset.itemId = item.id;
+    viewButton.textContent = "Ver resultado";
+
+    actions.append(viewButton);
+  }
+
   if (
     item.status === STATUS.ERROR &&
     canRetry(item)
@@ -1303,7 +1155,7 @@ function createFileItemElement(item, isNew) {
     retryButton.className = "button button-retry";
     retryButton.dataset.action = "retry";
     retryButton.dataset.itemId = item.id;
-    retryButton.textContent = "Reenviar";
+    retryButton.textContent = "Reprocessar";
 
     actions.append(retryButton);
   }
@@ -1401,6 +1253,12 @@ function renderGeneralActions(counts) {
 
   elements.clearQueueButton.disabled =
     counts.total === 0;
+
+  elements.exportJsonButton.disabled =
+    counts.success === 0;
+
+  elements.exportCsvButton.disabled =
+    counts.success === 0;
 }
 
 /* =========================================================
@@ -1495,136 +1353,192 @@ function sleep(milliseconds) {
   });
 }
 
-function initializeHealthCheck() {
-  if (
-    !elements.connectionStatus ||
-    !elements.connectionStatusLabel
-  ) {
-    console.error(
-      "[Healthcheck] Os elementos do indicador não foram encontrados."
-    );
-    return;
-  }
+/* =========================================================
+   Resultados e exportação
+   ========================================================= */
 
-  if (!CONFIG.HEALTHCHECK_URL) {
-    console.error("[Healthcheck] HEALTHCHECK_URL não foi configurada.");
-    updateConnectionStatus("offline");
-    return;
-  }
+let currentResultItemId = null;
 
-  console.log(
-    "[Healthcheck] Inicializado:",
-    CONFIG.HEALTHCHECK_URL
-  );
-
-  checkWorkflowHealth();
-
-  state.healthCheckIntervalId = window.setInterval(() => {
-    if (!document.hidden) {
-      checkWorkflowHealth();
-    }
-  }, CONFIG.HEALTHCHECK_INTERVAL_MS);
-
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) {
-      checkWorkflowHealth();
-    }
-  });
+function getResults() {
+  return state.items
+    .filter((item) => item.status === STATUS.SUCCESS && item.result)
+    .map((item) => item.result);
 }
 
-async function checkWorkflowHealth() {
-  if (state.isHealthCheckRunning) {
+function openResult(itemId) {
+  const item = state.items.find((queueItem) => queueItem.id === itemId);
+
+  if (!item || !item.result) {
     return;
   }
 
-  state.isHealthCheckRunning = true;
-  updateConnectionStatus("checking");
+  const result = item.result;
+  currentResultItemId = item.id;
 
-  const controller = new AbortController();
+  elements.resultTitle.textContent = result.arquivo;
+  elements.resultMeta.replaceChildren(
+    createMetaEntry("Autor", result.autor || "não identificado"),
+    createMetaEntry("Formato", result.formato.toUpperCase()),
+    createMetaEntry(
+      "Interrompido em",
+      result.interrompido_em || "fim do documento"
+    )
+  );
 
-  const timeoutId = window.setTimeout(() => {
-    controller.abort();
-  }, CONFIG.HEALTHCHECK_TIMEOUT_MS);
+  elements.resultWarnings.replaceChildren(
+    ...result.avisos.map((aviso) => {
+      const element = document.createElement("p");
+      element.textContent = aviso;
+      return element;
+    })
+  );
+  elements.resultWarnings.hidden = result.avisos.length === 0;
+
+  elements.resultArtesCount.textContent = String(result.artes_quantidade);
+  elements.resultArtes.replaceChildren(
+    ...result.artes.map((arte) => {
+      const element = document.createElement("li");
+      element.textContent = arte;
+      return element;
+    })
+  );
+
+  if (result.artes.length === 0) {
+    const element = document.createElement("li");
+    element.className = "result-empty";
+    element.textContent = "Nenhum texto sublinhado encontrado.";
+    elements.resultArtes.append(element);
+  }
+
+  elements.resultText.textContent = result.texto || "(sem texto)";
+
+  if (!elements.resultDialog.open) {
+    elements.resultDialog.showModal();
+  }
+}
+
+function createMetaEntry(label, value) {
+  const wrapper = document.createElement("div");
+  const term = document.createElement("dt");
+  const description = document.createElement("dd");
+
+  term.textContent = label;
+  description.textContent = value;
+  wrapper.append(term, description);
+
+  return wrapper;
+}
+
+function getCurrentResult() {
+  const item = state.items.find(
+    (queueItem) => queueItem.id === currentResultItemId
+  );
+
+  return item ? item.result : null;
+}
+
+async function copyCurrentResult() {
+  const result = getCurrentResult();
+
+  if (!result) {
+    return;
+  }
 
   try {
-    const healthUrl = new URL(CONFIG.HEALTHCHECK_URL);
-
-    healthUrl.searchParams.set(
-      "_healthcheck",
-      Date.now().toString()
-    );
-
-    console.log(
-      "[Healthcheck] Verificando:",
-      healthUrl.toString()
-    );
-
-    const response = await fetch(healthUrl.toString(), {
-      method: "GET",
-      headers: {
-        Accept: "application/json"
-      },
-      cache: "no-store",
-      credentials: "omit",
-      signal: controller.signal
-    });
-
-    console.log("[Healthcheck] HTTP:", response.status);
-
-    if (!response.ok) {
-      throw new Error(
-        `O healthcheck retornou HTTP ${response.status}.`
-      );
-    }
-
-    const responseText = await response.text();
-
-    console.log("[Healthcheck] Resposta:", responseText);
-
-    if (!responseText.trim()) {
-      throw new Error(
-        "O healthcheck retornou uma resposta vazia."
-      );
-    }
-
-    let data;
-
-    try {
-      data = JSON.parse(responseText);
-    } catch {
-      throw new Error(
-        "O healthcheck não retornou um JSON válido."
-      );
-    }
-
-    const result = Array.isArray(data) ? data[0] : data;
-
-    if (!result || result.online !== true) {
-      throw new Error(
-        'O healthcheck não retornou { "online": true }.'
-      );
-    }
-
-    updateConnectionStatus("online");
-  } catch (error) {
-    if (error?.name === "AbortError") {
-      console.warn("[Healthcheck] Tempo limite excedido.");
-    } else {
-      console.warn("[Healthcheck] Indisponível:", error);
-    }
-
-    updateConnectionStatus("offline");
-  } finally {
-    window.clearTimeout(timeoutId);
-    state.isHealthCheckRunning = false;
+    await navigator.clipboard.writeText(JSON.stringify(result, null, 2));
+    elements.resultCopyButton.textContent = "Copiado!";
+  } catch {
+    elements.resultCopyButton.textContent = "Não foi possível copiar";
   }
+
+  window.setTimeout(() => {
+    elements.resultCopyButton.textContent = "Copiar JSON";
+  }, 1600);
+}
+
+function downloadCurrentResult() {
+  const result = getCurrentResult();
+
+  if (!result) {
+    return;
+  }
+
+  const baseName = result.arquivo.replace(/\.[^.]+$/, "");
+  downloadFile(
+    `${baseName}.json`,
+    JSON.stringify(result, null, 2),
+    "application/json"
+  );
+}
+
+function exportResults(format) {
+  const results = getResults();
+
+  if (results.length === 0) {
+    return;
+  }
+
+  if (format === "json") {
+    downloadFile(
+      `${CONFIG.EXPORT_FILE_NAME}.json`,
+      JSON.stringify(results, null, 2),
+      "application/json"
+    );
+    return;
+  }
+
+  /* CSV: uma linha por arte (separador ";", pronto para Excel). */
+  const header = ["arquivo", "autor", "formato", "arte", "artes_quantidade"];
+  const rows = [header];
+
+  for (const result of results) {
+    const artes = result.artes.length > 0 ? result.artes : [""];
+
+    for (const arte of artes) {
+      rows.push([
+        result.arquivo,
+        result.autor,
+        result.formato,
+        arte,
+        String(result.artes_quantidade)
+      ]);
+    }
+  }
+
+  const csv = rows
+    .map((row) => row.map(escapeCsvValue).join(";"))
+    .join("\r\n");
+
+  downloadFile(
+    `${CONFIG.EXPORT_FILE_NAME}.csv`,
+    "\uFEFF" + csv,
+    "text/csv;charset=utf-8"
+  );
+}
+
+function escapeCsvValue(value) {
+  const text = String(value ?? "");
+  return /[";\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function downloadFile(fileName, content, type) {
+  const url = URL.createObjectURL(new Blob([content], { type }));
+  const link = document.createElement("a");
+
+  link.href = url;
+  link.download = fileName;
+  document.body.append(link);
+  link.click();
+  link.remove();
+
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function updateConnectionStatus(status) {
   const labels = {
     checking: "Verificando...",
-    online: "Workflow disponível",
-    offline: "Workflow indisponível"
+    online: "Processamento local",
+    offline: "Indisponível"
   };
 
   if (

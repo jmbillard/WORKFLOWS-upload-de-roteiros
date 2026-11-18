@@ -6,7 +6,7 @@
 
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
-  <meta name="description" content="Envie e acompanhe o processamento de arquivos de roteiro.">
+  <meta name="description" content="Extraia texto, autor e artes (textos sublinhados) de roteiros em DOCX, PDF e RTF, direto no navegador.">
 
   <title>Upload de Roteiros</title>
   <link
@@ -49,9 +49,9 @@
       </a>
 
       <div class="topbar-status">
-        <span id="connection-status" class="connection-status is-checking" role="status" aria-live="polite">
+        <span id="connection-status" class="connection-status is-online" role="status" aria-live="polite">
           <span class="connection-dot" aria-hidden="true"></span>
-          <span id="connection-status-label">Verificando...</span>
+          <span id="connection-status-label">Processamento local</span>
         </span>
 
         <!-- <span class="topbar-divider" aria-hidden="true"></span>
@@ -133,12 +133,12 @@
           <div class="integration-information">
             <span>
               <span class="information-icon">✓</span>
-              Identificação de redatores:<br>DOCX, PDF
+              Identificação de redatores:<br>DOCX, PDF, RTF
             </span>
 
             <span>
               <span class="information-icon">✓</span>
-              Extração de Artes:<br>DOCX, RTF
+              Extração de Artes:<br>DOCX, PDF, RTF
             </span>
           </div>
         </div>
@@ -149,7 +149,7 @@
         <header class="queue-header">
           <div>
             <p class="section-eyebrow">Área operacional</p>
-            <h2 id="queue-title">Fila de upload</h2>
+            <h2 id="queue-title">Fila de processamento</h2>
 
             <p id="queue-state-message" class="queue-state-message">
               Adicione arquivos para iniciar o processamento.
@@ -163,7 +163,7 @@
             </button>
 
             <button id="retry-all-button" class="button button-secondary button-compact" type="button" hidden>
-              Reenviar erros
+              Reprocessar erros
             </button>
 
             <details id="general-actions-menu" class="actions-menu">
@@ -173,6 +173,16 @@
               </summary>
 
               <div class="menu-popover">
+                <button id="export-json-button" type="button" disabled>
+                  Exportar resultados (JSON)
+                </button>
+
+                <button id="export-csv-button" type="button" disabled>
+                  Exportar artes (CSV)
+                </button>
+
+                <span class="menu-separator" aria-hidden="true"></span>
+
                 <button id="remove-completed-button" type="button" disabled>
                   Excluir concluídos
                 </button>
@@ -274,17 +284,17 @@
             <ol class="empty-steps">
               <li>
                 <span>1</span>
-                Cheque se o workflow está ativo
-              </li>
-
-              <li>
-                <span>2</span>
                 Selecione os documentos
               </li>
 
               <li>
+                <span>2</span>
+                Confira as artes de cada arquivo
+              </li>
+
+              <li>
                 <span>3</span>
-                Confira os cards no Trello
+                Exporte os resultados
               </li>
             </ol>
           </div>
@@ -295,6 +305,41 @@
     </div>
   </main>
 
+  <!-- Resultado de um arquivo -->
+  <dialog id="result-dialog" class="result-dialog" aria-labelledby="result-title">
+    <div class="result-dialog-inner">
+      <header class="result-header">
+        <div>
+          <p class="section-eyebrow">Resultado da extração</p>
+          <h2 id="result-title"></h2>
+        </div>
+
+        <button class="result-close" type="button" data-close-dialog aria-label="Fechar">×</button>
+      </header>
+
+      <dl id="result-meta" class="result-meta"></dl>
+
+      <div id="result-warnings" class="result-warnings" hidden></div>
+
+      <section class="result-section">
+        <h3>Artes <span id="result-artes-count" class="result-count">0</span></h3>
+        <ol id="result-artes" class="result-artes"></ol>
+      </section>
+
+      <details class="result-section result-text-section">
+        <summary><h3>Texto completo</h3></summary>
+        <pre id="result-text" class="result-text"></pre>
+      </details>
+
+      <footer class="result-footer">
+        <button id="result-copy-button" class="button button-secondary button-compact" type="button">Copiar JSON</button>
+        <button id="result-download-button" class="button button-secondary button-compact" type="button">Baixar JSON</button>
+        <button class="button button-secondary button-compact" type="button" data-close-dialog>Fechar</button>
+      </footer>
+    </div>
+  </dialog>
+
+  <script src="./extractor.js" defer></script>
   <script src="./app.js" defer></script>
 </body>
 
