@@ -7,11 +7,13 @@
 const CONFIG = Object.freeze({
   /*
    * A extração acontece no navegador (extractor.js). Os dados prontos
-   * e o arquivo original vão para o webhook do n8n (multipart/form-data).
+   * e o arquivo original vão, em multipart/form-data, para:
+   *   - "/api/roteiros": Pages Function que repassa ao n8n (recomendado
+   *     com Cloudflare Access; a URL do n8n fica em N8N_WEBHOOK_URL);
+   *   - ou a URL completa do webhook do n8n, chamado direto (sem Access).
    * null = só extrair e exportar, sem enviar nada.
    */
-  WEBHOOK_URL:
-    "****",
+  WEBHOOK_URL: "/api/roteiros",
 
   /**
    * Nome do campo multipart/form-data do arquivo recebido pelo n8n.
@@ -30,8 +32,7 @@ const CONFIG = Object.freeze({
   REQUEST_TIMEOUT_MS: 120000,
 
   /** Deve responder { "online": true }. null = sem indicador. */
-  HEALTHCHECK_URL:
-    "****",
+  HEALTHCHECK_URL: "/api/health",
 
   HEALTHCHECK_INTERVAL_MS: 30000,
   HEALTHCHECK_TIMEOUT_MS: 5000,
@@ -715,11 +716,29 @@ function markSuccess(item, message) {
 }
 
 function validateIntegrationConfiguration() {
-  if (!/^https?:\/\//i.test(CONFIG.WEBHOOK_URL || "")) {
+  if (!isConfiguredUrl(CONFIG.WEBHOOK_URL)) {
     throw new Error(
       "A URL do webhook ainda não foi configurada no app.js."
     );
   }
+}
+
+/* Aceita caminho do próprio site ("/api/...") ou URL http(s) completa. */
+function isConfiguredUrl(value) {
+  return typeof value === "string" && /^(\/|https?:\/\/)/i.test(value);
+}
+
+/*
+ * Com o Cloudflare Access, uma sessão expirada faz o servidor redirecionar
+ * para a tela de login. Com redirect: "manual" isso chega aqui como
+ * "opaqueredirect", em vez de um erro de CORS sem explicação.
+ */
+const ACCESS_EXPIRED_MESSAGE =
+  "Sua sessão do Cloudflare Access expirou. Recarregue a página e entre de novo.";
+
+function isAccessRedirect(response) {
+  return response.type === "opaqueredirect" ||
+    (response.status >= 300 && response.status < 400);
 }
 
 /*
@@ -767,8 +786,13 @@ async function postToWorkflow(item, result) {
       method: "POST",
       body: buildWorkflowForm(item, result),
       signal: controller.signal,
-      credentials: "omit"
+      credentials: "same-origin",
+      redirect: "manual"
     });
+
+    if (isAccessRedirect(response)) {
+      throw new Error(ACCESS_EXPIRED_MESSAGE);
+    }
 
     const responseText = await response.text();
 
@@ -1796,7 +1820,7 @@ function downloadFile(fileName, content, type) {
 }
 
 function initializeHealthCheck() {
-  if (!CONFIG.WEBHOOK_URL || !/^https?:\/\//i.test(CONFIG.HEALTHCHECK_URL || "")) {
+  if (!CONFIG.WEBHOOK_URL || !isConfiguredUrl(CONFIG.HEALTHCHECK_URL)) {
     updateConnectionStatus("local");
     return;
   }
@@ -1830,15 +1854,20 @@ async function checkWorkflowHealth() {
   );
 
   try {
-    const healthUrl = new URL(CONFIG.HEALTHCHECK_URL);
+    const healthUrl = new URL(CONFIG.HEALTHCHECK_URL, window.location.href);
     healthUrl.searchParams.set("_healthcheck", Date.now().toString());
 
     const response = await fetch(healthUrl.toString(), {
       headers: { Accept: "application/json" },
       cache: "no-store",
-      credentials: "omit",
+      credentials: "same-origin",
+      redirect: "manual",
       signal: controller.signal
     });
+
+    if (isAccessRedirect(response)) {
+      throw new Error(ACCESS_EXPIRED_MESSAGE);
+    }
 
     const data = await response.json().catch(() => null);
 
@@ -1848,15 +1877,19 @@ async function checkWorkflowHealth() {
 
     updateConnectionStatus("online");
   } catch (error) {
-    console.warn("[Healthcheck] Indisponível:", error.message || error);
-    updateConnectionStatus("offline");
+    const reason = error && error.name === "AbortError"
+      ? "O healthcheck excedeu o tempo limite."
+      : (error && error.message) || String(error);
+
+    console.warn("[Healthcheck] Indisponível:", reason);
+    updateConnectionStatus("offline", reason);
   } finally {
     window.clearTimeout(timeoutId);
     state.isHealthCheckRunning = false;
   }
 }
 
-function updateConnectionStatus(status) {
+function updateConnectionStatus(status, reason = "") {
   const labels = {
     checking: "Verificando...",
     online: "Workflow disponível",
@@ -1883,6 +1916,9 @@ function updateConnectionStatus(status) {
 
   elements.connectionStatusLabel.textContent =
     labels[status] || "Estado desconhecido";
+
+  /* Motivo do "indisponível" ao passar o mouse (ou tocar) no indicador. */
+  elements.connectionStatus.title = reason;
 }
 
 function expandWorkspace() {
