@@ -125,6 +125,21 @@ O DOCX é descompactado com `DecompressionStream`, nativo do navegador; o RTF é
 
 `extractor.js` → `EXTRACTION_CONFIG`: palavra de parada, regras de união, padrões ignorados, espessura dos traços de sublinhado em PDF.
 
+## Deploy como Worker (Workers & Pages → Worker com arquivos estáticos)
+
+Projetos criados hoje no Cloudflare costumam ser **Workers** com arquivos estáticos, não Pages. Neles a pasta `functions/` é **ignorada**: sem configuração extra, `/api/*` não existe e o indicador fica sempre "indisponível".
+
+Para isso existe o `wrangler.jsonc` + `worker/index.js`: os arquivos do site são servidos como assets estáticos, e só `/api/*` executa código, reaproveitando os mesmos handlers de `functions/`. O `.assetsignore` impede que código e configuração sejam publicados como arquivos do site.
+
+- O `name` do `wrangler.jsonc` é **`upload-de-roteiros-teste`**: só faz deploy nesse Worker de teste. Para usar em outro Worker, troque o nome.
+- Variáveis: as mesmas da tabela abaixo, em **Settings → Variables and Secrets** do Worker (`keep_vars` preserva as que forem só texto).
+- Access: no Worker, **Settings → Domains & Routes → workers.dev → Enable Cloudflare Access**, ou uma aplicação Access no domínio próprio.
+
+```bash
+npx wrangler dev --var N8N_WEBHOOK_URL:https://... --var N8N_HEALTHCHECK_URL:https://...
+npx wrangler deploy
+```
+
 ## Deploy no Cloudflare Pages com Access
 
 ### 1. Projeto no Pages

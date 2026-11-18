@@ -1,0 +1,11 @@
+# Não publicar como arquivos do site
+.git
+.gitignore
+.assetsignore
+.wrangler
+.dev.vars*
+node_modules
+worker
+functions
+wrangler.jsonc
+README.md
