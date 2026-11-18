@@ -6,9 +6,20 @@
 
 const CONFIG = Object.freeze({
   /*
-   * Todo o processamento acontece no navegador (extractor.js).
-   * Nenhum arquivo é enviado para servidor.
+   * A extração acontece no navegador (extractor.js). O resultado e o
+   * arquivo original vão para a Pages Function, que cria o card no
+   * Trello. Use null para só extrair e exportar, sem servidor.
    */
+  API_URL: "/api/roteiros",
+  HEALTHCHECK_URL: "/api/health",
+
+  /* Enviar o arquivo original para ser anexado ao card. */
+  ATTACH_ORIGINAL_FILE: true,
+
+  REQUEST_TIMEOUT_MS: 120000,
+  HEALTHCHECK_INTERVAL_MS: 30000,
+  HEALTHCHECK_TIMEOUT_MS: 8000,
+
   MAX_FILE_SIZE_BYTES: 25 * 1024 * 1024,
   ALLOWED_EXTENSIONS: ["docx", "txt", "pdf", "rtf"],
 
@@ -41,6 +52,7 @@ const state = {
   isRunnerActive: false,
   isWorkspaceExpanded: false,
   renderedItemIds: new Set(),
+  isHealthCheckRunning: false,
 
   previousCounts: {
     total: 0,
@@ -117,7 +129,7 @@ function initialize() {
   initializeVisualEffects();
   registerEvents();
   render();
-  updateConnectionStatus("online");
+  initializeHealthCheck();
 }
 
 function initializeVisualEffects() {
@@ -578,6 +590,7 @@ async function processItem(item) {
   item.attempts += 1;
   item.justCompleted = false;
   item.result = null;
+  item.cardUrl = null;
 
   expandWorkspace();
   render();
@@ -588,10 +601,19 @@ async function processItem(item) {
     }
 
     const result = await window.RoteiroExtractor.extractFile(item.file);
-
     item.result = result;
+
+    let sent = null;
+
+    if (CONFIG.API_URL) {
+      item.message = "Criando card no Trello...";
+      render();
+      sent = await sendResult(item, result);
+      item.cardUrl = sent.card_url || null;
+    }
+
     item.status = STATUS.SUCCESS;
-    item.message = describeResult(result);
+    item.message = describeResult(result, sent);
     item.justCompleted = true;
 
     window.setTimeout(() => {
@@ -606,13 +628,74 @@ async function processItem(item) {
   }
 }
 
-function describeResult(result) {
+async function sendResult(item, result) {
+  const formData = new FormData();
+
+  formData.append("resultado", JSON.stringify(result));
+  formData.append("request_id", item.requestId);
+
+  if (CONFIG.ATTACH_ORIGINAL_FILE) {
+    formData.append("file", item.file, item.file.name);
+  }
+
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(
+    () => controller.abort(),
+    CONFIG.REQUEST_TIMEOUT_MS
+  );
+
+  try {
+    const response = await fetch(CONFIG.API_URL, {
+      method: "POST",
+      body: formData,
+      signal: controller.signal,
+      credentials: "same-origin"
+    });
+
+    const text = await response.text();
+    let data = null;
+
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = null;
+    }
+
+    if (!response.ok || !data || data.success !== true) {
+      const detail = data && typeof data.message === "string"
+        ? data.message
+        : `HTTP ${response.status}`;
+
+      throw new Error(`Texto extraído, mas o card não foi criado: ${detail}`);
+    }
+
+    return data;
+  } catch (error) {
+    if (error && error.name === "AbortError") {
+      throw new Error("O servidor demorou demais para responder.");
+    }
+
+    if (error instanceof TypeError) {
+      throw new Error("Não foi possível acessar o servidor. Verifique a conexão.");
+    }
+
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+function describeResult(result, sent) {
   const parts = [
     result.artes_quantidade === 1
       ? "1 arte"
       : `${result.artes_quantidade} artes`,
     result.autor ? `autor: ${result.autor}` : "autor não identificado"
   ];
+
+  if (sent && sent.message) {
+    parts.unshift(sent.message.replace(/\.$/, ""));
+  }
 
   if (result.avisos.length > 0) {
     parts.push(result.avisos[0]);
@@ -1133,6 +1216,18 @@ function createFileItemElement(item, isNew) {
   const actions = document.createElement("div");
   actions.className = "file-actions";
 
+  if (item.status === STATUS.SUCCESS && item.cardUrl) {
+    const cardLink = document.createElement("a");
+
+    cardLink.className = "button button-retry";
+    cardLink.href = item.cardUrl;
+    cardLink.target = "_blank";
+    cardLink.rel = "noopener";
+    cardLink.textContent = "Abrir card";
+
+    actions.append(cardLink);
+  }
+
   if (item.status === STATUS.SUCCESS && item.result) {
     const viewButton = document.createElement("button");
 
@@ -1534,11 +1629,70 @@ function downloadFile(fileName, content, type) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+function initializeHealthCheck() {
+  if (!CONFIG.API_URL || !CONFIG.HEALTHCHECK_URL) {
+    updateConnectionStatus("local");
+    return;
+  }
+
+  checkWorkflowHealth();
+
+  window.setInterval(() => {
+    if (!document.hidden) {
+      checkWorkflowHealth();
+    }
+  }, CONFIG.HEALTHCHECK_INTERVAL_MS);
+
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      checkWorkflowHealth();
+    }
+  });
+}
+
+async function checkWorkflowHealth() {
+  if (state.isHealthCheckRunning) {
+    return;
+  }
+
+  state.isHealthCheckRunning = true;
+
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(
+    () => controller.abort(),
+    CONFIG.HEALTHCHECK_TIMEOUT_MS
+  );
+
+  try {
+    const response = await fetch(CONFIG.HEALTHCHECK_URL, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+      credentials: "same-origin",
+      signal: controller.signal
+    });
+
+    const data = await response.json().catch(() => null);
+
+    if (!response.ok || !data || data.online !== true) {
+      throw new Error(data && data.message ? data.message : `HTTP ${response.status}`);
+    }
+
+    updateConnectionStatus("online");
+  } catch (error) {
+    console.warn("[Healthcheck] Indisponível:", error.message || error);
+    updateConnectionStatus("offline");
+  } finally {
+    window.clearTimeout(timeoutId);
+    state.isHealthCheckRunning = false;
+  }
+}
+
 function updateConnectionStatus(status) {
   const labels = {
     checking: "Verificando...",
-    online: "Processamento local",
-    offline: "Indisponível"
+    online: "Trello conectado",
+    offline: "Trello indisponível",
+    local: "Processamento local"
   };
 
   if (
@@ -1554,7 +1708,9 @@ function updateConnectionStatus(status) {
     "is-offline"
   );
 
-  elements.connectionStatus.classList.add(`is-${status}`);
+  elements.connectionStatus.classList.add(
+    `is-${status === "local" ? "online" : status}`
+  );
 
   elements.connectionStatusLabel.textContent =
     labels[status] || "Estado desconhecido";

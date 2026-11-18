@@ -2202,3 +2202,7 @@ body.motion-ready .queue-content {
     padding: 18px 16px 16px;
   }
 }
+
+a.button {
+  text-decoration: none;
+}

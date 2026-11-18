@@ -7,7 +7,14 @@ Ferramenta web que extrai, **direto no navegador e sem n8n**, as informações d
 - **texto**: texto completo, um parágrafo por linha;
 - **artes**: todos os textos sublinhados, sem duplicatas, e `artes_quantidade`.
 
-Nenhum arquivo sai do computador do usuário: não há servidor nem webhook.
+Depois da extração, uma **Pages Function** do Cloudflare (`functions/api/roteiros.js`) cria o card no Trello. A chave do Trello fica só no Cloudflare, nunca no navegador. A extração roda no navegador porque o pdf.js não cabe no limite de CPU de um Worker no plano gratuito.
+
+```
+navegador: extractor.js  ──(resultado JSON + arquivo)──▶  /api/roteiros  ──▶  Trello
+           (texto, autor, artes)                           (Pages Function)
+```
+
+Com `API_URL: null` em `app.js` o site funciona só localmente (extrai e exporta, sem Trello).
 
 ## Visão geral
 
@@ -38,6 +45,44 @@ Os parâmetros ficam no topo do `extractor.js`, em `EXTRACTION_CONFIG`.
 - **TXT** não tem sublinhado nem autor: só o texto é extraído.
 - Cabeçalho, rodapé e notas de rodapé não entram no texto.
 
+## Card criado no Trello
+
+Na lista `TRELLO_LIST_ID`:
+
+- **nome**: nome do arquivo, sem extensão;
+- **descrição**: autor, nome do arquivo, quantidade e lista numerada das artes;
+- **checklist "Artes"**: um item por arte;
+- **anexo**: o arquivo original;
+- **etiquetas**: as de `TRELLO_LABEL_IDS`, se configuradas.
+
+Reenvios do mesmo arquivo na mesma sessão não duplicam o card: a descrição guarda um `roteiro-id` e a função procura por ele na lista antes de criar.
+
+## Deploy no Cloudflare Pages
+
+1. **Workers & Pages → Create → Pages → Connect to Git**, escolha este repositório.
+   - Framework preset: *None*; Build command: vazio; Build output directory: `/`.
+   - A pasta `functions/` é publicada automaticamente como Pages Functions.
+2. **Settings → Variables and Secrets** (Production e Preview):
+
+   | Variável | Tipo | Valor |
+   |---|---|---|
+   | `TRELLO_KEY` | Secret | API key do Power-Up (trello.com/power-ups/admin) |
+   | `TRELLO_TOKEN` | Secret | Token gerado para essa key |
+   | `TRELLO_LIST_ID` | Text | ID da lista de destino |
+   | `TRELLO_LABEL_IDS` | Text (opcional) | IDs de etiquetas, separados por vírgula |
+   | `ALLOWED_ORIGINS` | Text (opcional) | Outras origens que podem chamar a API |
+
+   O ID da lista aparece abrindo `https://trello.com/b/<board>.json` e procurando a lista em `lists`.
+3. Faça um novo deploy. O indicador no topo mostra **Trello conectado** quando `/api/health` consegue ler a lista.
+4. **Recomendado:** proteja o site com **Cloudflare Access** (Zero Trust → Access → Applications), liberando só os e-mails da equipe. Sem isso, qualquer pessoa com a URL consegue criar cards. A função recusa chamadas de outras origens, mas isso não substitui autenticação.
+
+### Testar localmente
+
+```bash
+cp .dev.vars.example .dev.vars   # preencha as variáveis
+npx wrangler pages dev .
+```
+
 ## Estrutura de arquivos
 
 ```
@@ -45,6 +90,9 @@ index.html          Estrutura da página
 styles.css          Estilos (tokens de cor, layout, animações, responsividade)
 app.js              Interface: validação, fila, resultados, exportação
 extractor.js        Extração de texto, autor e artes (DOCX, PDF, RTF, TXT)
+functions/api/roteiros.js   POST: cria o card no Trello
+functions/api/health.js     GET: confere configuração e acesso à lista
+functions/_lib/trello.js    Cliente da API do Trello e utilitários
 vendor/pdfjs/       pdf.js 4.10.38 (Mozilla, Apache-2.0), carregado só quando há PDF
 favicon.png         Ícone da aba
 ```
@@ -57,6 +105,10 @@ O DOCX é descompactado com `DecompressionStream`, nativo do navegador; o RTF é
 
 | Campo | Descrição |
 |---|---|
+| `API_URL` | Endpoint que cria o card (`/api/roteiros`). `null` = só local. |
+| `HEALTHCHECK_URL` | Endpoint do indicador de status (`/api/health`). |
+| `ATTACH_ORIGINAL_FILE` | Envia o arquivo original para anexar ao card. |
+| `REQUEST_TIMEOUT_MS` | Tempo máximo de espera pela criação do card. |
 | `MAX_FILE_SIZE_BYTES` | Limite de tamanho por arquivo. |
 | `ALLOWED_EXTENSIONS` | Extensões aceitas. |
 | `MAX_ATTEMPTS` | Limite de tentativas de reprocessamento (`null` = ilimitado). |
@@ -66,8 +118,9 @@ O DOCX é descompactado com `DecompressionStream`, nativo do navegador; o RTF é
 
 ## Como usar localmente
 
-1. Sirva a pasta por um servidor HTTP simples (ex.: `python3 -m http.server`). Abrir o `index.html` direto do disco (`file://`) não funciona para PDF, porque o navegador bloqueia o carregamento de módulos nesse modo.
-2. Abra no navegador e arraste os roteiros.
+Sem Trello: defina `API_URL: null` e sirva a pasta por um servidor HTTP simples (ex.: `python3 -m http.server`). Com Trello, use `wrangler pages dev` (acima).
+
+Abrir o `index.html` direto do disco (`file://`) não funciona para PDF, porque o navegador bloqueia o carregamento de módulos nesse modo.
 
 ## Compatibilidade
 
